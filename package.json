@@ -1,0 +1,22 @@
+{
+  "name": "whatsapp-glass-native",
+  "version": "1.0.0",
+  "description": "WhatsApp Web in a glass-morphic Electron shell, themed from the live Caelestia Material 3 scheme with WCAG-verified text contrast.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/palette.test.js && node test/ink.test.js && node test/inject.test.js && node test/ua.test.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "electron",
+    "caelestia",
+    "material3",
+    "glassmorphism"
+  ],
+  "license": "MIT",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^44.5.1"
+  }
+}
