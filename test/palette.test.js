@@ -53,6 +53,7 @@ Module._load = loadMain;
 
 const {
   parseColor,
+  relativeLuminance,
   contrastRatio,
   composite,
   buildPalette,
@@ -369,6 +370,9 @@ for (const [label, inputScheme, overrides, followSystem, expectDark] of PALETTES
       ['primary', palette.primary, CONTRAST.primary, [page, panel]],
       ['secondary', palette.secondary, CONTRAST.secondary, [page, panel]],
       ['bubble ink', palette.onBubble, CONTRAST.onBubble, [paintedIncoming, paintedOutgoing]],
+      // The opaque disc the contact initials are drawn on, NOT the painted
+      // bubble: there is no alpha in that stack at all.
+      ['avatar ink', palette.onAvatar, CONTRAST.onBubble, [palette.incoming, palette.outgoing]],
       ['accent', palette.accentInk, CONTRAST.accent, [panel, paintedOutgoing]],
     ];
 
@@ -480,6 +484,82 @@ function ruleFor(css, marker) {
 /** Render a colour the way the stylesheet does, for exact-match assertions. */
 function rgb(c) {
   return `rgb(${Math.round(c.r)} ${Math.round(c.g)} ${Math.round(c.b)})`;
+}
+
+/** Remove the named functional pseudo-class groups (`:not(`, `:has(`). */
+function removeGroups(selector, names) {
+  let out = '';
+  for (let i = 0; i < selector.length; i++) {
+    if (names.some((n) => selector.startsWith(n, i))) {
+      let depth = 0;
+      for (; i < selector.length; i++) {
+        if (selector[i] === '(') depth++;
+        else if (selector[i] === ')' && --depth === 0) break;
+      }
+      continue;
+    }
+    out += selector[i];
+  }
+  return out;
+}
+
+const stripNot = (s) => removeGroups(s, [':not(']);
+
+/**
+ * Remove `:not(...)` and `:has(...)` groups, leaving the container identity.
+ *
+ * These groups say when a rule applies, not which node it applies to, and the
+ * two sides of the blur/guard comparison disagree on them by design: the blur
+ * excludes `:not(:has(video))`, the guard arms on `:has(video)`, and the blur
+ * may narrow further still. Comparing them raw would report a coverage gap
+ * that does not exist - `[tabindex="-1"]:has(div[contenteditable="true"])`
+ * looks unblurred-guarded until you notice the guard holds the far wider
+ * `[tabindex="-1"]:has(video)`.
+ */
+const stripGuards = (s) => removeGroups(s, [':not(', ':has(']);
+
+/**
+ * Split a comma-separated selector list without cutting inside parentheses,
+ * so `:is(a, b) > c, d` yields two selectors rather than three.
+ */
+function splitSelectorList(selector) {
+  const parts = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of selector) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) {
+      parts.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts.filter(Boolean);
+}
+
+/** The members of a leading `:is(...)`, with the wrapper stripped. */
+function splitIsList(selector) {
+  const sel = selector.trim();
+  if (!sel.startsWith(':is(')) return [sel];
+  // Walk to the paren that closes the :is(), rather than matching greedily -
+  // these selectors routinely end in :not(:has(video)), and a greedy .* would
+  // swallow that and report the rule as having no blur targets at all.
+  let depth = 0;
+  let close = -1;
+  for (let i = 0; i < sel.length; i++) {
+    if (sel[i] === '(') depth++;
+    else if (sel[i] === ')' && --depth === 0) {
+      close = i;
+      break;
+    }
+  }
+  if (close === -1) return [sel];
+  const inner = sel.slice(4, close);
+  const tail = sel.slice(close + 1);
+  return splitSelectorList(inner).map((part) => part + tail);
 }
 
 test('bubble ink clears its floor on the painted bubble, not the token', () => {
@@ -1022,6 +1102,611 @@ test('hostile tokens are ignored, not applied', () => {
   const css = generateMaskCSS(hostile, null, false);
   assert.ok(!/html\s*\{/.test(css), 'injected selector is live');
   assert.ok(!/cbca8e;\}/.test(css), 'hostile token reached the stylesheet');
+});
+
+/* ------------------------------------------------------------------ *
+ * WhatsApp Design System tokens
+ *
+ * The chat list does not read the legacy token set this sheet has always
+ * written. It resolves its colour through --WDS-* custom properties, and an
+ * undeclared custom property has no value at all - it falls through to
+ * whatever WhatsApp's own cascade computed. That failure is invisible in a
+ * screenshot of the pane as a whole (the surfaces *are* themed) and obvious
+ * once you look for it: stock WhatsApp green in the avatar rings.
+ *
+ * So these are pinned from the DOM. The list is what a real chat-list subtree
+ * references, transcribed from the rendered markup rather than guessed from a
+ * token name - a property invented from a plausible-looking name would satisfy
+ * every test below while changing nothing on screen.
+ * ------------------------------------------------------------------ */
+
+/** Every custom property the :root rule declares, with its raw value. */
+function customProps(css) {
+  const root = parseRules(css).find((r) => r.selector === ':root');
+  assert.ok(root, 'stylesheet has no :root rule');
+  const props = new Map();
+  for (const m of root.body.matchAll(/(--[a-zA-Z0-9-]+)\s*:\s*([^;]+);/g)) {
+    props.set(m[1], m[2].trim());
+  }
+  return props;
+}
+
+const WDS_TOKENS = [
+  '--WDS-content-deemphasized',
+  '--WDS-components-outline-profile-photo',
+  '--WDS-persistent-activity-indicator',
+  '--WDS-systems-status-seen',
+  '--WDS-components-profile-photo-surface-green',
+  '--WDS-components-profile-photo-content-green',
+  '--WDS-components-profile-photo-surface-cobalt',
+  '--WDS-components-profile-photo-content-cobalt',
+];
+
+test('every WDS token the chat list reads is declared', () => {
+  const props = customProps(generateMaskCSS(scheme, null, false));
+
+  for (const name of WDS_TOKENS) {
+    assert.ok(props.has(name), `${name} is read by the chat list but never declared`);
+
+    // A declared-but-empty or var()-valued property is the same failure as an
+    // undeclared one, and it is invisible to a plain "is it there" check.
+    const value = props.get(name);
+    assert.match(value, /^rgb\(/, `${name} resolves to "${value}", not a colour`);
+    assert.ok(
+      !/\b(?:var|initial|inherit|unset)\b/.test(value),
+      `${name} defers to something else: "${value}"`
+    );
+    // Undeclared custom properties inherit through the cascade, so a value
+    // without !important loses to anything WhatsApp sets on a closer ancestor.
+    assert.ok(
+      value.endsWith('!important'),
+      `${name} can be overridden by WhatsApp's own cascade without !important`
+    );
+  }
+});
+
+test('WDS tokens are fed from the resolved palette, never a literal', () => {
+  // If one of these is ever hand-written into the template it will keep
+  // working, keep passing every contrast test, and stop following the scheme.
+  const palette = buildPalette(scheme, null, false);
+  const props = customProps(generateMaskCSS(scheme, null, false));
+  const resolved = new Set(
+    ['veil', 'panel', 'incoming', 'outgoing', 'primary', 'secondary', 'onBubble', 'onAvatar', 'accentInk'].map(
+      (k) => rgb(palette[k])
+    )
+  );
+
+  for (const name of WDS_TOKENS) {
+    const value = props.get(name).replace(' !important', '');
+    assert.ok(resolved.has(value), `${name} is "${value}", which is not a palette colour`);
+  }
+});
+
+test('the status ring reads as a ring, not a solid disc', () => {
+  // Two roles, two tokens. Asserting the two *colours* differ would be wrong:
+  // a palette whose accent resolves onto its secondary ink is legitimate, and
+  // WhatsApp's own ring collapses the same way. What must hold is that the
+  // sheet wires them to different roles in the first place - a copy-paste that
+  // pointed both at the accent would pass a distinctness check on some
+  // palettes and fail on others.
+  const palette = buildPalette(scheme, null, false);
+  const props = customProps(generateMaskCSS(scheme, null, false));
+
+  assert.strictEqual(props.get('--WDS-persistent-activity-indicator'), `${rgb(palette.secondary)} !important`);
+  assert.strictEqual(props.get('--WDS-systems-status-seen'), `${rgb(palette.accentInk)} !important`);
+
+  // The accent is also what the sheet already spends on read receipts and the
+  // send button, so "seen" landing on it keeps one accent in the app.
+  assert.ok(
+    props.get('--accent') === props.get('--WDS-systems-status-seen'),
+    'the seen token no longer matches the app accent'
+  );
+});
+
+test('avatar ink is verified on the opaque disc, not the painted bubble', () => {
+  // The whole reason onAvatar exists. Contact initials are drawn on an opaque
+  // disc with no bubble alpha in the stack, so the painted-bubble ink is the
+  // wrong reference for it - and on the live scheme the two disagree by enough
+  // to matter: the painted reference lands under the 7:1 AAA floor that the
+  // opaque one clears.
+  const seen = [];
+  let diverged = 0;
+
+  for (const [, inputScheme, overrides, followSystem] of PALETTES) {
+    osDark = !followSystem;
+    const palette = buildPalette(inputScheme, overrides, followSystem);
+    const worstFor = (ink) =>
+      [palette.incoming, palette.outgoing].reduce((w, s) => Math.min(w, contrastRatio(ink, s)), Infinity);
+    const worst = worstFor(palette.onAvatar);
+    const best = bestAchievable(palette.primary, [palette.incoming, palette.outgoing]);
+    assert.ok(
+      worst >= Math.min(CONTRAST.onBubble, best) - 0.05,
+      `avatar ink manages ${worst.toFixed(2)}:1 on the worst disc; the best any colour can do is ${best.toFixed(2)}:1`
+    );
+
+    if (rgb(palette.onAvatar) !== rgb(palette.onBubble)) {
+      diverged += 1;
+      seen.push({ opaque: worst, painted: worstFor(palette.onBubble) });
+    }
+  }
+
+  // If the two never diverged, onAvatar would be a second name for onBubble
+  // and the opaque reference would be untested - which is the failure this
+  // whole field exists to prevent.
+  assert.ok(
+    diverged > 0,
+    `onAvatar never differs from onBubble across ${PALETTES.length} palettes, so it is not testing anything new`
+  );
+  // And the divergence has to have cost something: at least one palette where
+  // the ink that clears the opaque disc does NOT clear the floor once it is
+  // measured against the painted bubble. Without that, borrowing onBubble
+  // would have been correct and the extra field is noise.
+  assert.ok(
+    seen.some((s) => s.opaque >= CONTRAST.onBubble && s.painted < CONTRAST.onBubble),
+    'onAvatar only ever diverges upward; borrowing onBubble would have been fine'
+  );
+});
+
+test('chat-list ink is keyed on stable handles, not build hashes', () => {
+  // WhatsApp's chat-list classes are build hashes and turn over on every
+  // release; the data-testids have not. A selector written against either
+  // hashed class in the transcribed markup would pass every other test here and
+  // match nothing on the next build.
+  const css = generateMaskCSS(scheme, null, false);
+
+  for (const rule of parseRules(css)) {
+    const hashed = rule.selector.match(/\.x[0-9a-z]{6,}/g);
+    assert.ok(!hashed, `selector "${rule.selector}" is keyed on a build hash (${hashed})`);
+  }
+
+  const rule = ruleFor(css, '[data-testid="cell-frame-primary-detail"]');
+  for (const testid of [
+    'cell-frame-primary-detail',
+    'cell-frame-secondary',
+    'last-msg-status',
+    'icon-unread-count',
+    'icon-mentions',
+    'chat-msg-symbol',
+  ]) {
+    assert.ok(rule.selector.includes(`[data-testid="${testid}"]`), `chat-list rule drops ${testid}`);
+  }
+  // The count text is a grandchild of the labelled wrapper, so naming only the
+  // wrapper leaves the digits inheriting body ink.
+  assert.ok(
+    rule.selector.includes('[data-testid="icon-unread-count"] span'),
+    'the unread count text is not reached'
+  );
+
+  // Colour only. A background or a filter here would put a containing-block
+  // property on an unpromoted node, and the video guard above has no entry for
+  // it - the generic guard test would catch that, but this says why the list
+  // is allowed to be short.
+  assert.match(rule.body.trim(), /^color:\s*rgb\([^)]+\)\s*!important;?$/, `chat-list rule sets more than ink: ${rule.body.trim()}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * Tint
+ *
+ * The tint exists because the palettes these tokens come from put almost no
+ * chroma in their neutrals, which over a desktop wallpaper reads as neutral
+ * grey however correct the palette is. The property that makes it affordable
+ * is that it holds relative luminance: every guarantee in this file is a
+ * contrast ratio, contrastRatio() reads luminance alone, so a tint that does
+ * not move it cannot spend anything.
+ * ------------------------------------------------------------------ */
+
+const chroma = (c) => Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b);
+
+/** Sweep the tint across a spread of colours and check what it may not move. */
+test('the tint holds relative luminance', () => {
+  const colours = [
+    '#000000', '#ffffff', '#808080', '#130d09', '#281d17', '#1a120d',
+    '#74482d', '#005c4b', '#f6b997', '#8c4d4b', '#00a884', '#d9fdd3',
+  ];
+  const hues = [0, 21.5, 120, 240, 359];
+
+  for (const hex of colours) {
+    const color = parseColor(hex);
+    for (const amount of [0.1, 0.35, 0.6, 0.85, 1]) {
+      for (const hue of hues) {
+        const tinted = main.tintSurface(color, hue, amount);
+        const drift = Math.abs(relativeLuminance(tinted) - relativeLuminance(color));
+        // 24 bisection steps land well inside this; the tolerance is here to
+        // catch an actual regression (a dropped step, a clamp that bites), not
+        // to absorb a fuzzy fit.
+        assert.ok(
+          drift <= relativeLuminance(color) * 0.005 + 1e-4,
+          `${hex} at tint ${amount} hue ${hue}: luminance drifted ${drift.toFixed(6)} (${relativeLuminance(color).toFixed(6)} -> ${relativeLuminance(tinted).toFixed(6)})`
+        );
+      }
+    }
+  }
+});
+
+test('the tint adds chroma, and only chroma', () => {
+  // Dark neutrals are where the tint has headroom: a near-black has almost no
+  // chroma to lose, so there is room to add some without touching luminance.
+  for (const hex of ['#130d09', '#281d17', '#1a120d']) {
+    const color = parseColor(hex);
+    let previous = chroma(color);
+    for (const amount of [0.2, 0.4, 0.6, 0.8, 1]) {
+      const tinted = main.tintSurface(color, 21.5, amount);
+      assert.ok(
+        chroma(tinted) > previous,
+        `${hex}: chroma fell from ${previous.toFixed(0)} to ${chroma(tinted).toFixed(0)} at tint ${amount}`
+      );
+      previous = chroma(tinted);
+    }
+  }
+});
+
+test('tint: 0 leaves the untinted path byte-identical', () => {
+  // The regression guard for the whole feature. If tinting ever leaked into
+  // the untinted path, every surface in the app would shift and none of the
+  // other assertions here would notice - they all check contrast, and a shift
+  // that holds luminance holds contrast too. So this compares raw values
+  // against the scheme's own tokens rather than re-deriving an expectation.
+  const off = buildPalette(scheme, { tint: 0 }, false);
+  assert.strictEqual(rgb(off.veil), rgb(parseColor(scheme.colours.background)), 'veil');
+  assert.strictEqual(rgb(off.incoming), rgb(parseColor(scheme.colours.surfaceContainerLow)), 'incoming');
+
+  // And the helper is a pass-through at zero, not a round trip through HSL
+  // that happens to land on the same numbers.
+  const color = parseColor('202016');
+  assert.deepStrictEqual(main.tintSurface(color, 59, 0), color);
+});
+
+test('the tint reaches the neutrals and stops at the outgoing bubble', () => {
+  // primaryContainer is already the most saturated token a tonal scheme has,
+  // and that bubble is the one place the app's own colour is meant to survive,
+  // so it has to come through the tint untouched. Comparing across two tint
+  // values rather than against the raw token: at tint 0 the tint is a no-op
+  // everywhere, so asserting against the token says nothing about which
+  // surfaces the tint was allowed to reach.
+  const off = buildPalette(scheme, { tint: 0 }, false);
+  const on = buildPalette(scheme, { tint: 1 }, false);
+
+  for (const key of ['veil', 'panel', 'incoming']) {
+    assert.notStrictEqual(rgb(on[key]), rgb(off[key]), `${key} was not tinted`);
+  }
+  assert.strictEqual(rgb(on.outgoing), rgb(off.outgoing), 'outgoing was tinted');
+});
+
+test('the tint costs no contrast budget', () => {
+  // The point of holding luminance. If tinting moved it, the dead-zone escape
+  // would spend alpha to compensate - which is exactly the trade the tint is
+  // supposed to avoid - and the ink would have to move with it.
+  const off = buildPalette(scheme, { tint: 0 }, false);
+  const on = buildPalette(scheme, { tint: 1 }, false);
+
+  assert.strictEqual(on.veil.a, off.veil.a, 'the veil gave up alpha to carry the tint');
+  assert.strictEqual(on.panel.a, off.panel.a, 'the panel gave up alpha to carry the tint');
+
+  for (const key of ['primary', 'secondary', 'onBubble', 'onAvatar', 'accentInk']) {
+    assert.strictEqual(on[key].r, off[key].r, `${key} moved`);
+    assert.strictEqual(on[key].g, off[key].g, `${key} moved`);
+    assert.strictEqual(on[key].b, off[key].b, `${key} moved`);
+  }
+
+  // And the surfaces the tint DOES move must still clear their floors, on the
+  // painted result, at the maximum tint rather than at the default.
+  const surfaces = painted(on);
+  assert.ok(contrastRatio(on.primary, surfaces.page) >= CONTRAST.primary);
+  assert.ok(contrastRatio(on.primary, surfaces.panel) >= CONTRAST.primary);
+  assert.ok(contrastRatio(on.secondary, surfaces.panel) >= CONTRAST.secondary);
+  assert.ok(contrastRatio(on.onBubble, surfaces.incoming) >= CONTRAST.onBubble);
+  assert.ok(contrastRatio(on.onBubble, surfaces.outgoing) >= CONTRAST.onBubble);
+  assert.ok(contrastRatio(on.panel, surfaces.page) >= CONTRAST.panelSep);
+});
+
+test('the tint reaches the glass surfaces', () => {
+  // A tint that only moved the bubbles would leave the complaint exactly where
+  // it started: the page and the panes are the surfaces drawn over the
+  // wallpaper, so they are the ones that show the desktop's colour instead of
+  // the scheme's.
+  const off = painted(buildPalette(scheme, { tint: 0 }, false));
+  const on = painted(buildPalette(scheme, { tint: 1 }, false));
+  assert.ok(chroma(on.page) > chroma(off.page), `page chroma ${chroma(off.page).toFixed(0)} -> ${chroma(on.page).toFixed(0)}`);
+  assert.ok(chroma(on.panel) > chroma(off.panel), `panel chroma ${chroma(off.panel).toFixed(0)} -> ${chroma(on.panel).toFixed(0)}`);
+});
+
+test('the tint falls back rather than failing on junk', () => {
+  // colors.json is hand-written. `tint` and `tintColor` are read from it, so
+  // both have to survive a typo without taking the palette down with them.
+  for (const overrides of [{ tint: 'abc' }, { tint: null }, { tint: -5 }, { tint: 99 }, { tintColor: 'zzz' }]) {
+    const p = buildPalette(scheme, overrides, false);
+    assert.ok(Number.isFinite(p.veil.a) && Number.isFinite(p.veil.r), `junk ${JSON.stringify(overrides)} broke the veil`);
+    assert.ok(chroma(painted(p).panel) > 0);
+  }
+});
+
+test('a light scheme keeps a legible page when tinted', () => {
+  // Light mode is where the tint has the least room: near a fixed luminance of
+  // white the sRGB gamut carries very little chroma, so the veil barely moves
+  // and the panel does. That is arithmetic, not a bug - but it must not cost
+  // legibility on the way, which the default does apply.
+  const light = lightScheme('fdf9ee', ['f6f2e7', 'f0ece1', 'eae6db', 'e4e0d5']);
+  for (const amount of [0, 0.6, 1]) {
+    const p = buildPalette(light, { tint: amount }, false);
+    const s = painted(p);
+    assert.ok(contrastRatio(p.primary, s.page) >= CONTRAST.primary, `page at tint ${amount}`);
+    assert.ok(contrastRatio(p.primary, s.panel) >= CONTRAST.primary, `panel at tint ${amount}`);
+    assert.ok(contrastRatio(p.panel, s.page) >= CONTRAST.panelSep, `separation at tint ${amount}`);
+  }
+});
+
+test('the sidebar pane carries the blur under its current id', () => {
+  // The pane was renamed #side -> #pane-side. Nothing about that rename is
+  // loud: the sheet keeps parsing, every other assertion here still passes,
+  // and the only symptom is that the sidebar quietly stops being glass and
+  // falls back to whatever the host paints. That is the failure this pins.
+  const rule = ruleFor(generateMaskCSS(scheme, null, false), '#pane-side');
+  assert.ok(
+    /backdrop-filter:\s*blur\(/.test(rule.body),
+    'the sidebar pane is named but carries no blur, so it is not glass'
+  );
+  assert.ok(
+    /background-color/.test(rule.body),
+    'the sidebar pane is named but has no surface of its own'
+  );
+});
+
+test('every blurred pane is also covered by the video guard', () => {
+  // OVERLAY_CONTAINERS exists so that a selector added to a blur rule cannot
+  // be forgotten in the guard. Asserting the two lists agree is what keeps
+  // that comment honest: the moment one gains a selector the other does not, a
+  // video inside that pane gets blurred and then re-anchored off-screen.
+  const rules = parseRules(generateMaskCSS(scheme, null, false));
+
+  const blurred = [];
+  for (const rule of rules) {
+    if (!/backdrop-filter:\s*blur\(/.test(rule.body)) continue;
+    for (const sel of splitSelectorList(stripGuards(rule.selector))) {
+      for (const part of splitIsList(sel)) blurred.push(part);
+    }
+  }
+  assert.ok(blurred.length, 'nothing carries a blur at all');
+
+  // The guard is the rule that arms *on* a video. The other none-rule in the
+  // sheet is a :not(:has(video)) exclusion, which suppresses nothing on its
+  // own - matching it here would make this pass vacuously. Strip :not() first,
+  // since the substring :has(video) occurs inside the exclusion too.
+  const guard = rules.find(
+    (r) =>
+      /backdrop-filter:\s*none\s*!important/.test(r.body) &&
+      /:has\(video\)/.test(stripNot(r.selector))
+  );
+  assert.ok(guard, 'no rule suppresses the blur for panes holding a video');
+  const guarded = new Set(
+    splitSelectorList(guard.selector).flatMap((s) => splitIsList(s)).map(stripGuards)
+  );
+  for (const sel of blurred) {
+    assert.ok(
+      guarded.has(sel),
+      `${sel} is blurred but absent from the video guard, so a video there is silently re-anchored`
+    );
+  }
+});
+
+test('the search rules survive the host restacking its own wrappers', () => {
+  // Two dumps of the same search field, weeks of WhatsApp apart, differ by two
+  // wrapper divs and seven classes on the container. Anything written as a
+  // structural path - `> div > div input`, or the hashed classes on the way
+  // down - would match on one build and silently match nothing on the other,
+  // which is the same failure as keying on a build hash and just as quiet. The
+  // anchor is the stable testid and every step after it is a descendant step,
+  // so the depth the host happens to use is not this sheet's problem.
+  const css = generateMaskCSS(scheme, null, false);
+  const rules = parseRules(css).filter((r) => /chat-list-search-container/.test(r.selector));
+  assert.ok(rules.length >= 2, `expected both search rules, found ${rules.length}`);
+  for (const rule of rules) {
+    for (const sel of splitSelectorList(rule.selector)) {
+      assert.ok(
+        /chat-list-search-container"\]\s*\S/.test(sel),
+        `${sel} is not anchored on the search container's testid`
+      );
+      assert.ok(
+        !/[>+~]/.test(sel),
+        `${sel} walks the host's nesting positionally, so a restack breaks it`
+      );
+    }
+  }
+});
+
+test('the search field text is named, because a form control cannot inherit', () => {
+  // Measured: rgb(255,255,255), the UA's fieldtext - brighter than any ink the
+  // palette defines and the same in every scheme. A form control has a colour
+  // set on it directly, so no ancestor's declaration reaches it; the input has
+  // to be a target. Typed text is what you came to read, so body ink.
+  const css = generateMaskCSS(scheme, null, false);
+  const p = buildPalette(scheme, null, false);
+  const rule = ruleFor(css, 'search-container"] input');
+  assert.ok(rule, 'the search input is named by no rule at all');
+  assert.ok(rule.body.includes(rgb(p.primary)), 'typed text is not body ink');
+});
+
+test('the search placeholder has a rule of its own, on the right surface', () => {
+  // ::placeholder is not inherited - it is a separate UA declaration - so
+  // naming the input does nothing for it. Left alone it measured
+  // rgb(117,117,117): a fixed grey, about 4.2:1 on the pane, under the AA
+  // floor for text this size and identical in every scheme because it never
+  // consults one. Assert the rule exists *and* is anchored to the search
+  // container, because a bare ::placeholder would repaint every placeholder on
+  // every surface in the app, including ones this sheet has not measured.
+  const css = generateMaskCSS(scheme, null, false);
+  const p = buildPalette(scheme, null, false);
+  const rule = ruleFor(css, '::placeholder');
+  assert.ok(rule, 'the placeholder has no rule, so it keeps the UA grey');
+  assert.ok(
+    /search-container"\]\s*input::placeholder$/.test(rule.selector.trim()),
+    `the placeholder rule is not scoped to the search field: ${rule.selector.trim()}`
+  );
+  assert.ok(rule.body.includes(rgb(p.secondary)), 'the placeholder is not supporting ink');
+});
+
+test('the filter bar gets palette ink, and the selected tab reads as primary', () => {
+  // All five measured rgb(255,255,255) - the UA fieldtext - along with every
+  // label, both counts and the chevron. The pane header rule is scoped to the
+  // pane's direct children on purpose, and these sit five and six levels down,
+  // so this is a separate rule rather than an oversight in that one.
+  const css = generateMaskCSS(scheme, null, false);
+  const p = buildPalette(scheme, null, false);
+  const base = ruleFor(css, 'chat-list-filters');
+  assert.ok(base, 'the filter bar is named by no rule at all');
+  assert.ok(base.body.includes(rgb(p.secondary)), 'unselected filter tabs are not supporting ink');
+
+  // One undifferentiated strip would drop the distinction the host draws with
+  // colour, so the selected tab is promoted. Keyed on aria-selected, which is
+  // in the markup rather than inferred from a class.
+  const selected = ruleFor(css, 'aria-selected="true"');
+  assert.ok(selected, 'no rule distinguishes the selected filter tab');
+  assert.ok(selected.body.includes(rgb(p.primary)), 'the selected filter tab is not body ink');
+});
+
+test('the filter bar keeps both handles, because neither one covers all five buttons', () => {
+  // The host wraps these inconsistently. The overflow chevron
+  // (additional-filters) sits outside any filter-button wrapper, and the Groups
+  // entry in the overflow menu (label_item_3) carries no aria-controls at all.
+  // Either handle alone leaves exactly one button back on the UA's white
+  // fieldtext, and nothing else in the suite would notice - so name which one
+  // goes missing, rather than just that something did.
+  const rule = ruleFor(generateMaskCSS(scheme, null, false), 'chat-list-filters');
+  const targets = splitSelectorList(rule.selector).flatMap((s) => splitIsList(s));
+  assert.ok(
+    targets.some((s) => /\[aria-label="chat-list-filters"\] button/.test(s)),
+    'the tablist-label handle is gone, so additional-filters (the overflow chevron) is unthemed again'
+  );
+  assert.ok(
+    targets.some((s) => /\[data-testid="filter-button"\] button/.test(s)),
+    'the filter-button handle is gone, so label_item_3 (Groups, in the overflow menu) is unthemed again'
+  );
+  // Same reasoning as the search field: the host is free to restack these, and
+  // a positional selector would match on one build and nothing on the next.
+  for (const sel of targets) {
+    assert.ok(!/[>+~]/.test(sel), `${sel} walks the host's nesting positionally`);
+  }
+});
+
+test('the pane header buttons get ink, and the label span is named too', () => {
+  // Measured in a real browser: nothing in the sheet named a <button>, so the
+  // label resolved to rgb(0,0,0) - black ink on a dark panel. The label text
+  // sits one level below the button inside a [role="group"] wrapper with no
+  // colour set in between, so naming only the button would leave the text
+  // exactly where it was.
+  const rule = ruleFor(generateMaskCSS(scheme, null, false), '> button');
+  const p = buildPalette(scheme, null, false);
+  assert.ok(
+    rule.body.includes(rgb(p.primary)),
+    'the pane header buttons are not painted in primary ink'
+  );
+  assert.ok(
+    rule.selector.includes('> button span'),
+    'the label span inside the button is not named, so the text is left unstyled'
+  );
+});
+
+test('the pane header button rule cannot reach a nested button', () => {
+  // A bare `button` selector would also claim the composer, the attach and
+  // emoji pickers and the send button, each of which already carries ink of
+  // its own. The direct-child combinator off a pane id is the entire reason
+  // the rule is safe, so pin both halves of it rather than trust either.
+  const rule = ruleFor(generateMaskCSS(scheme, null, false), '> button');
+  const selectors = splitSelectorList(rule.selector).flatMap((s) => splitIsList(s));
+  assert.ok(selectors.length, 'no button selector found to check');
+  for (const sel of selectors) {
+    const anchor = sel.match(/^(.*?)>\s*button(.*)$/);
+    assert.ok(anchor, `${sel} does not anchor on a direct-child button`);
+    assert.ok(
+      /#(side|pane-side)$/.test(anchor[1].trim()),
+      `${sel} is not anchored directly to the pane id`
+    );
+    // The only thing allowed to follow is the label span itself. Anything with
+    // a second combinator, a descendant step, or a compound class chain would
+    // be reaching past the pane's own header buttons into a nested control.
+    assert.ok(
+      /^\s*(span|\[[^\]]+\])?$/.test(anchor[2]),
+      `${sel} reaches past the pane's own header buttons into a nested control`
+    );
+  }
+});
+
+test('the encryption footer and its link are two different inks', () => {
+  // The notice is supporting text, so it is secondary. The link is the one
+  // colour in the sidebar that the host resolves on its own terms - it is an
+  // <a>, so on a build that routes links through --teal it already agrees,
+  // and on a build that does not, naming the element is the only thing
+  // pinning it. Collapsing the two would leave a footnote-coloured link, or
+  // a body-coloured one, and the second is what the user sees.
+  const css = generateMaskCSS(scheme, null, false);
+  const p = buildPalette(scheme, null, false);
+  const notice = ruleFor(css, 'chatlist-e2e-message"]');
+  const link = ruleFor(css, 'chatlist-e2e-message-link"]');
+  assert.notStrictEqual(link.selector, notice.selector, 'notice and link share one rule');
+  assert.ok(notice.body.includes(rgb(p.secondary)), 'the footer notice is not secondary ink');
+  assert.ok(link.body.includes(rgb(p.accentInk)), 'the footer link is not the accent');
+});
+
+test('the row context chevron is named in its own right, not left to its cell', () => {
+  // The chevron sits inside cell-frame-secondary, which this sheet already
+  // names - so it reads as covered and is not. It is a <button>, and the UA
+  // stylesheet puts a colour on form controls directly; a declaration on the
+  // element beats an inherited one however specific the ancestor's selector is.
+  // Measured, it was rgb(0,0,0) while its parent cell was already on-token.
+  // So the selector has to be a target of the rule in its own right: adding it
+  // to the list is the fix, and inheriting from the cell is not.
+  const rule = ruleFor(generateMaskCSS(scheme, null, false), 'context-btn');
+  assert.ok(rule, 'the row context chevron is named by no rule at all');
+  const targets = splitSelectorList(rule.selector).flatMap((s) => splitIsList(s));
+  assert.ok(
+    targets.includes('[data-testid="context-btn"]'),
+    `the chevron is only reached by inheritance, which the UA beats: ${rule.selector.trim()}`
+  );
+  assert.ok(
+    rule.body.includes(rgb(buildPalette(scheme, null, false).secondary)),
+    'the chevron is not supporting ink'
+  );
+});
+
+test('the chevron is not folded into the pane header button rule', () => {
+  // The header buttons are scoped by position - direct children of the pane -
+  // precisely so a blanket `button` selector cannot flatten the composer, the
+  // attach and emoji pickers and the send button, each of which carries ink of
+  // its own. A row chevron is not a header control, so it belongs to the row
+  // rules; parking it in the header rule would be the same overreach by
+  // another route, and the scoping is the part worth protecting.
+  const header = ruleFor(generateMaskCSS(scheme, null, false), '> button');
+  assert.ok(
+    !/context-btn/.test(header.selector),
+    `the chevron is being coloured by the header rule: ${header.selector.trim()}`
+  );
+});
+
+test('nothing in the chat list resolves to a colour that is not a token', () => {
+  // The failure this catches is not a wrong hue, it is an unnamed element:
+  // anything the sheet does not name falls through to the host or the UA, and
+  // a subtree of build-hashed classes has a lot of room for that to happen
+  // without any assertion noticing. Every ink the sheet emits for this
+  // subtree has to be one the palette actually defines.
+  const p = buildPalette(scheme, null, false);
+  const known = new Set(
+    [p.primary, p.secondary, p.accentInk, p.outgoing, p.incoming, p.onAvatar]
+      .map((c) => rgb(c))
+  );
+  const rules = parseRules(generateMaskCSS(scheme, null, false));
+  for (const rule of rules) {
+    if (!/chat|list|bubble|footer|pane|button|e2e|mentions|unread|last-msg|cell-frame/.test(rule.selector)) {
+      continue;
+    }
+    const m = rule.body.match(/color:\s*(rgb\([^)]*\))/g);
+    if (!m) continue;
+    for (const decl of m) {
+      const value = decl.replace(/color:\s*/, '').trim();
+      assert.ok(
+        known.has(value),
+        `${rule.selector.trim()} paints ${value}, which is not a palette ink`
+      );
+    }
+  }
 });
 
 /* ------------------------------------------------------------------ *

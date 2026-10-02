@@ -87,11 +87,19 @@ const MIN_PANEL_SEPARATION = 1.15;
  * the opaque-token result is ~0.5:1, which is why the palette code cannot
  * simply keep checking the token.
  *
- * Near-opaque by intent: bubbles read as glass mostly through the pane behind
- * them, and a very transparent fill buys little while putting bubble ink at
- * the mercy of whatever is on the desktop wallpaper.
+ * Not as opaque as it used to be. Bubbles are the largest area of the window
+ * by a wide margin, so an alpha set for the pane's sake reads as a solid
+ * foreground sitting on top of glass rather than as glass itself - and since
+ * the panes either side of the thread were never the problem, the tint and
+ * transparency ask and the bubbles were where it was being paid for.
+ *
+ * The floor is not aesthetic. Dropping further puts bubble ink at the mercy of
+ * whatever is on the desktop wallpaper, because at some alpha the pane's own
+ * colour stops mattering and the composited bubble lands on the desktop
+ * directly. 0.86 is where that stops being true for the bubble fills these
+ * palettes actually produce.
  */
-const BUBBLE_ALPHA = 0.94;
+const BUBBLE_ALPHA = 0.86;
 
 const WHITE = { r: 255, g: 255, b: 255, a: 1 };
 const BLACK = { r: 0, g: 0, b: 0, a: 1 };
@@ -234,6 +242,102 @@ function toRgbaString({ r, g, b, a }) {
   if (a >= 1) return toRgbString({ r, g, b });
   const alpha = Math.round(clamp(a, 0, 1) * 1000) / 1000;
   return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${alpha})`;
+}
+
+function rgbToHsl({ r, g, b }) {
+  const red = clamp(r, 0, 255) / 255;
+  const green = clamp(g, 0, 255) / 255;
+  const blue = clamp(b, 0, 255) / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const delta = max - min;
+  const light = (max + min) / 2;
+
+  if (!delta) return { h: 0, s: 0, l: light };
+
+  return {
+    h: 60 * (max === red ? (green - blue) / delta + (green < blue ? 6 : 0)
+      : max === green ? (blue - red) / delta + 2
+      : (red - green) / delta + 4),
+    s: light > 0.5 ? delta / (2 - max - min) : delta / (max + min),
+    l: light,
+  };
+}
+
+function hslToRgb({ h, s, l }) {
+  const hue = (((h % 360) + 360) % 360) / 60;
+  const sat = clamp(s, 0, 1);
+  const light = clamp(l, 0, 1);
+  const chroma = (1 - Math.abs(2 * light - 1)) * sat;
+  const second = chroma * (1 - Math.abs((hue % 2) - 1));
+  const match = light - chroma / 2;
+  const sector = [
+    [chroma, second, 0], [second, chroma, 0], [0, chroma, second],
+    [0, second, chroma], [second, 0, chroma], [chroma, 0, second],
+  ][Math.floor(hue) % 6];
+
+  return {
+    r: (sector[0] + match) * 255,
+    g: (sector[1] + match) * 255,
+    b: (sector[2] + match) * 255,
+    a: 1,
+  };
+}
+
+/**
+ * Push a surface toward the scheme's tint hue *without moving its luminance*.
+ *
+ * Tonal palettes put almost no chroma in their neutrals. Caelestia's `dynamic`
+ * background is `130d09`, a near-black whose channels differ by ten, and its
+ * low surface is `1a120d` - thirteen. Painted at the veil's alpha over a
+ * desktop wallpaper, that leaves the wallpaper's own colour on screen rather
+ * than the scheme's, which is why a perfectly correct palette reads as flat
+ * neutral grey.
+ *
+ * The obvious fix - mix() toward `surfaceTint` - is what makes this worth
+ * writing carefully. `surfaceTint` is the mode's own tint, so in a dark scheme
+ * it is a *light* colour, and blending toward it raises the page's luminance.
+ * Luminance is the exact quantity the transparency budget is spent on: on that
+ * same palette, reaching for the tint that way costs the veil more than three
+ * quarters of its alpha before body ink stops clearing 7:1 over a white
+ * wallpaper. Asking for a tint and asking for transparency turn out to be the
+ * same request, and only one of them can be had.
+ *
+ * Moving the hue while holding relative luminance decouples them. It is also
+ * free by construction rather than by luck: every guarantee downstream is a
+ * contrast ratio, contrastRatio() reads relative luminance alone, and that
+ * value is unchanged - so panel separation, the dead-zone escapes and the ink
+ * searches all evaluate to exactly what they did before. The tint can only
+ * ever add chroma, never spend anything.
+ *
+ * Lightness is recovered by bisection rather than carried over from the input
+ * because HSL lightness and WCAG relative luminance are different quantities:
+ * holding one does not hold the other, and the bisection is what turns "about
+ * the same brightness" into the same brightness to several decimal places.
+ *
+ * Bright surfaces gain less, and that is arithmetic rather than a limitation
+ * of the approach: near a fixed luminance of white the sRGB gamut has very
+ * little chroma to give, so a light scheme's veil barely moves while its panel
+ * - which sits lower on the ramp - does.
+ */
+function tintSurface(color, hue, amount) {
+  if (amount <= 0 || !Number.isFinite(amount)) return { ...color };
+
+  const target = relativeLuminance(color);
+  const base = rgbToHsl(color);
+  // Hue and luminance are pinned, so saturation is the only free parameter:
+  // walk it toward the ceiling the gamut allows at this luminance.
+  const sat = base.s + (1 - base.s) * clamp(amount, 0, 1);
+
+  let low = 0;
+  let high = 1;
+  for (let step = 0; step < 24; step += 1) {
+    const mid = (low + high) / 2;
+    if (relativeLuminance(hslToRgb({ h: hue, s: sat, l: mid })) < target) low = mid;
+    else high = mid;
+  }
+
+  return { ...hslToRgb({ h: hue, s: sat, l: (low + high) / 2 }), a: color.a };
 }
 
 /* ================================================================== *
@@ -457,7 +561,16 @@ function buildPalette(scheme, overrides, followSystem) {
 
   // 2. Surfaces. bg -> veil -> panel, matching what actually gets painted.
   const o = overrides || {};
-  const bg = resolveTint(o.bg ?? tokens.background, requestedDark ? '#0b0e11' : '#f0f2f5');
+
+  // The tint hue is taken from the scheme's own `surfaceTint`, which Material
+  // defines per mode, so the same code warms a light scheme and cools a dark
+  // one without ever being told which it is looking at.
+  const tintSource = parseColor(o.tintColor ?? tokens.surfaceTint) ?? parseColor(tokens.primary);
+  const tintHue = tintSource ? rgbToHsl(tintSource).h : 0;
+  const tintAmount = resolveNumber(o.tint, 0.6, 0, 1);
+  const tinted = (color) => tintSurface(color, tintHue, tintAmount);
+
+  const bg = tinted(resolveTint(o.bg ?? tokens.background, requestedDark ? '#0b0e11' : '#f0f2f5'));
 
   // The tokens decide the appearance, not the requested mode.
   const isDark = isDarkSurface(bg);
@@ -465,7 +578,7 @@ function buildPalette(scheme, overrides, followSystem) {
   const wallpaper = isDark ? WHITE : BLACK;
 
   const veilAlpha = resolveNumber(o.veil, isDark ? 0.74 : 0.86, 0, 1);
-  const panelAlpha = resolveNumber(o.opacity, isDark ? 0.55 : 0.72, 0.05, 1);
+  const panelAlpha = resolveNumber(o.opacity, isDark ? 0.45 : 0.62, 0.05, 1);
   const blur = Math.round(resolveNumber(o.blur, 20, 0, 80));
   const saturate = resolveNumber(o.saturate, 180, 100, 400);
 
@@ -511,9 +624,14 @@ function buildPalette(scheme, overrides, followSystem) {
   }
 
   // Elevation is judged against the solid background, not the wallpaper.
-  const panelPick = parseColor(o.panel)
+  const panelSource = parseColor(o.panel)
     ? { color: parseColor(o.panel), token: 'colors.json' }
     : choosePanel(tokens, bg);
+  // Separation below is measured with contrastRatio(), which reads luminance
+  // alone and the tint does not touch - so tinting the panel here cannot
+  // trigger the repair loop underneath, and cannot move the panel off the
+  // page's side of the mid-point either.
+  const panelPick = { ...panelSource, color: tinted(panelSource.color) };
 
   // The panel is translucent, so its *painted* result is what has to separate
   // - not the opaque token. Solve for lift and alpha together, since raising
@@ -549,10 +667,11 @@ function buildPalette(scheme, overrides, followSystem) {
   // ink search blends in opaque space and needs an opaque reference.
   //
   // The bubble is therefore hardened against the surface it is actually painted
-  // on, and each step re-composites. That keeps the guarantee honest if
-  // BUBBLE_ALPHA ever drops far enough for the panel to matter - at the
-  // current 0.94 the two spaces agree on every palette in the suite, which a
-  // 7,920-case sweep confirmed, so this is insurance rather than a fix.
+  // on, and each step re-composites. That keeps the guarantee honest at the
+  // alpha the bubbles are painted with, where the token space and the painted
+  // space have long since parted company: a bubble at BUBBLE_ALPHA over a
+  // panel at panelAlpha is nowhere near the token it came from, so hardening
+  // against the token would be hardening the wrong colour.
   const paintBubble = (token) => composite({ ...token, a: BUBBLE_ALPHA }, panelBackdrop);
 
   const bubbleFor = (raw) => {
@@ -570,8 +689,14 @@ function buildPalette(scheme, overrides, followSystem) {
 
   // A mid-tone primaryContainer (which tonal palettes do produce) is pushed
   // out of the dead zone before any ink is chosen for it.
+  //
+  // The tint reaches the neutral half of the palette and not the accent half.
+  // `surfaceContainerLow` is a near-black that needs rescuing the same way the
+  // veil does; `primaryContainer` is already the most saturated token these
+  // schemes have, so there is nothing to recover, and that bubble is the one
+  // place the app's own colour is supposed to survive.
   const incoming = bubbleFor(
-    resolveTint(o.incoming ?? tokens.surfaceContainerLow, isDark ? '#202c33' : '#ffffff')
+    tinted(resolveTint(o.incoming ?? tokens.surfaceContainerLow, isDark ? '#202c33' : '#ffffff'))
   );
   const outgoing = bubbleFor(
     resolveTint(o.outgoing ?? tokens.primaryContainer, isDark ? '#005c4b' : '#d9fdd3')
@@ -597,6 +722,13 @@ function buildPalette(scheme, overrides, followSystem) {
   // accent has to clear against too.
   const bubbleSurfaces = [paintBubble(incoming), paintBubble(outgoing)];
   const accentSurfaces = [panelBackdrop, paintBubble(outgoing)];
+  // Contact-initial avatars are opaque discs painted straight onto the panel,
+  // with no bubble alpha anywhere in the stack, so their ink is checked against
+  // the opaque bubble tokens rather than against paintBubble(). onBubble is
+  // verified on the composited result, which at BUBBLE_ALPHA is within a step
+  // of the opaque token - but "within a step" is not a guarantee, and this one
+  // costs a single extra call.
+  const avatarSurfaces = [incoming, outgoing];
 
   const readable = (color, target, scope) => {
     const base = { ...color, a: 1 };
@@ -639,6 +771,8 @@ function buildPalette(scheme, overrides, followSystem) {
     // anything that could terminate it early.
     source: scheme ? `${commentSafe(scheme.name) || 'caelestia'}/${commentSafe(scheme.flavour) || 'default'}` : 'fallback',
     panelToken: commentSafe(panelPick.token),
+    tint: tintAmount,
+    tintHue,
     veil,
     panel,
     incoming,
@@ -651,6 +785,9 @@ function buildPalette(scheme, overrides, followSystem) {
     // survive on the primaryContainer fill, which M3 does not guarantee at
     // AAA for every tonal spot.
     onBubble: readable(primary, CONTRAST.onBubble, bubbleSurfaces),
+    // Avatar initials sit at 20px in current builds, which is not large text
+    // under WCAG, so they take the bubble floor rather than the 4.5:1 one.
+    onAvatar: readable(primary, CONTRAST.onBubble, avatarSurfaces),
     accentInk: readable(accent, CONTRAST.accent, accentSurfaces),
   };
 }
@@ -658,37 +795,6 @@ function buildPalette(scheme, overrides, followSystem) {
 /* ================================================================== *
  * CSS generation
  * ================================================================== */
-
-/**
- * Every container this stylesheet can paint or promote, in one list.
- *
- * The status viewer is a viewport-fixed overlay around a <video>, and
- * `transform` / `backdrop-filter` / `filter` / `perspective` / `contain` /
- * `will-change` each make an element the containing block for its
- * fixed-position descendants. One of those on an ancestor of the player
- * re-anchors it away from the viewport, which is silent: the video keeps
- * decoding and the audio keeps playing while the picture is never seen.
- *
- * This was previously handled by an opt-out naming three containers while the
- * pane and promotion rules below reach five and six respectively, so any mount
- * point outside those three still got a blur. The list is the whole reachable
- * set, and it is the only place that says so - a selector added to the glass
- * rules must be added here too, or the guarantee quietly stops holding.
- */
-const OVERLAY_CONTAINERS = [
-  '#side',
-  '#main',
-  '#main > div',
-  'header',
-  '._akbd',
-  '[role="region"]',
-  'footer',
-  '[data-asset-chat-background="true"]',
-  '.message-list',
-  '[data-animated-message-list]',
-  '.message-in',
-  '.message-out',
-];
 
 function generateMaskCSS(scheme, overrides, followSystem) {
   const p = buildPalette(scheme, overrides, followSystem);
@@ -702,6 +808,7 @@ function generateMaskCSS(scheme, overrides, followSystem) {
 /* ===================================================================
    WhatsApp Glass Native - ${p.source} (${p.mode})
    panel token: ${p.panelToken}
+   tint: ${p.tint} (hue ${p.tintHue.toFixed(1)}, luminance held)
    Regenerated on OS appearance change and on scheme.json edits.
    =================================================================== */
 
@@ -722,9 +829,10 @@ function generateMaskCSS(scheme, overrides, followSystem) {
   --compose-input-background: ${veilLifted} !important;
   --dropdown-background: ${panel} !important;
 
-  /* Bubbles - translucent over the blurred pane. buildPalette verifies ink
-     against the opaque tokens, so alpha stays inside what that guarantee
-     survives; see BUBBLE_ALPHA. */
+  /* Bubbles - translucent over the blurred pane. buildPalette hardens and
+     verifies ink against the bubble composited at exactly BUBBLE_ALPHA, so the
+     alpha is inside what that guarantee was measured at rather than assumed
+     to be safe. */
   --incoming-background: ${toRgbaString({ ...p.incoming, a: BUBBLE_ALPHA })} !important;
   --outgoing-background: ${toRgbaString({ ...p.outgoing, a: BUBBLE_ALPHA })} !important;
 
@@ -751,6 +859,47 @@ function generateMaskCSS(scheme, overrides, followSystem) {
   --border-list: ${toRgbaString({ ...p.panel, a: 0.45 })} !important;
   --conversation-header-border: ${toRgbaString({ ...p.panel, a: 0.45 })} !important;
   --conversation-panel-border: ${toRgbaString({ ...p.panel, a: 0.45 })} !important;
+
+  /* -------------------------------------------------------------------
+   * WhatsApp Design System tokens
+   *
+   * Everything above is the legacy token set. It is not what the chat list
+   * reads any more: current builds resolve their colour through --WDS-*
+   * custom properties, and a custom property that is never declared has no
+   * value at all - so it falls through to whatever WhatsApp's own cascade
+   * computed, which knows nothing about this palette. The result is a fully
+   * themed pane with stock WhatsApp colour still painted on top of it: the
+   * avatar outline, the status rings, the "seen" tick and the initial-letter
+   * discs all keep the stock hue.
+   *
+   * Declaring them here is purely additive. No legacy token changes value,
+   * and no rule below has to learn that WDS exists - the page resolves the
+   * same variables it already resolves, and they now resolve to the glass
+   * palette instead of to WhatsApp's.
+   *
+   * The two status tokens are fed from different roles on purpose. The status
+   * ring is two overlapping arcs and WhatsApp uses them to separate the
+   * unviewed remainder from the viewed part, so the muted token takes the ring
+   * base and the accent takes the arc - which keeps read receipts, the one
+   * place WhatsApp reuses "seen", on the same accent as the send button rather
+   * than on supporting ink. On a palette whose accent happens to resolve onto
+   * the secondary ink the two coincide and the ring reads solid; that is the
+   * same thing WhatsApp's own ring does when its pair matches, so it is not
+   * forced apart here.
+   * ------------------------------------------------------------------- */
+  --WDS-content-deemphasized: ${toRgbString(p.secondary)} !important;
+  --WDS-components-outline-profile-photo: ${toRgbString(p.secondary)} !important;
+  --WDS-persistent-activity-indicator: ${toRgbString(p.secondary)} !important;
+  --WDS-systems-status-seen: ${toRgbString(p.accentInk)} !important;
+
+  /* Initial-letter avatars. The green disc is the app's outgoing fill and the
+     cobalt disc its incoming fill, so a contact tile is the same two colours
+     as the message bubbles; onAvatar is verified against both opaque tokens
+     (see avatarSurfaces) rather than borrowed from bubble ink. */
+  --WDS-components-profile-photo-surface-green: ${toRgbString(p.outgoing)} !important;
+  --WDS-components-profile-photo-content-green: ${toRgbString(p.onAvatar)} !important;
+  --WDS-components-profile-photo-surface-cobalt: ${toRgbString(p.incoming)} !important;
+  --WDS-components-profile-photo-content-cobalt: ${toRgbString(p.onAvatar)} !important;
 }
 
 /* Let the desktop wallpaper through so the blur has something to sample. */
@@ -773,7 +922,7 @@ body {
  * the result is cached until something behind them changes, so the cost is
  * paid on resize / theme change rather than per frame.
  * ------------------------------------------------------------------- */
-:is(#side, #main, header, ._akbd, [role="region"]):not(:has(video)) {
+:is(#side, #pane-side, #main, header, ._akbd, [role="region"]):not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: ${filter} !important;
   -webkit-backdrop-filter: ${filter} !important;
@@ -869,7 +1018,18 @@ body {
    reach, which is what makes the guarantee hold regardless of where the player
    ends up. :is() rather than a bare comma list so it out-specifies the pane
    rule above on every branch, including the two whose own selectors are only
-   type/attribute selectors and would otherwise tie or lose. */
+   type/attribute selectors and would otherwise tie or lose.
+
+   That completeness used to be a comment's promise and nothing more - there
+   was an OVERLAY_CONTAINERS list beside it that no rule ever read, so
+   forgetting a container here cost a status update playing as invisible audio
+   and nothing would have said so. It is now an assertion instead: every
+   selector carrying a blur is checked to appear here, so the two lists cannot
+   drift apart silently.
+
+   #pane-side is the sidebar in current builds, #side the same pane in the ones
+   before it. Both are listed because there is no version check here and the
+   older id costs nothing. */
 #main:has(video),
 #main > div:has(video),
 [data-asset-chat-background="true"]:has(video) {
@@ -877,7 +1037,7 @@ body {
   background-color: transparent !important;
 }
 
-:is(#side, #main, #main > div, header, ._akbd, [role="region"], footer,
+:is(#side, #pane-side, #main, #main > div, header, ._akbd, [role="region"], footer,
     [data-asset-chat-background="true"], .message-list,
     [data-animated-message-list], .message.message-in, .message.message-out, [tabindex="-1"]):has(video) {
   backdrop-filter: none !important;
@@ -1056,6 +1216,160 @@ div[class*="message-out"] [data-icon^="tail-"] path,
 .message-out [data-icon^="tail-"] svg,
 .message-out [data-icon^="tail-"] path {
   fill: ${toRgbString(p.outgoing)} !important;
+}
+
+/* ---------------------------------------------------------------------
+ * Chat-list rows
+ *
+ * The chat list is a different generation of markup from the message pane,
+ * and two details make it fall straight through everything above:
+ *
+ *   1. It has no [data-icon]. The icons are inline <svg fill="currentColor">
+ *      with the class attribute empty, so the blanket icon rule cannot reach
+ *      them - but currentColor means naming the *container* is enough.
+ *   2. Its classes are build hashes (x10l6tqk xh8yej3 x1g42fcv). Those change
+ *      whenever WhatsApp ships, so nothing here is keyed on one. Every
+ *      selector below is a data-testid, which is a test hook rather than
+ *      styling - and it is the only handle on this subtree that has stayed
+ *      put across the builds where all of those hashes turned over.
+ *
+ * Supporting ink is the one part of a row that is never what you came to
+ * read: timestamps, mention glyphs, the attachment/video/voice markers in the
+ * preview line, and the preview text itself. Those take the secondary token;
+ * the row title keeps inheriting the body colour.
+ *
+ * The unread count is in that list too, and it is the least obvious entry: it
+ * is the one thing on a row that is a notification rather than a label, so
+ * leaving it to inherit body ink makes the whole row read as body copy. It
+ * needs its inner span named as well, because the count sits one level below
+ * the aria-labelled wrapper and nothing sets colour between them.
+ *
+ * The context chevron looks already covered and is not. It sits inside
+ * cell-frame-secondary, which is named on the line below, and it still measured
+ * rgb(0,0,0) - because it is a <button>, and the UA stylesheet puts a colour on
+ * form controls directly. A declaration on the element beats an inherited one
+ * no matter how specific the ancestor's selector is, so the whole family below
+ * this point that is a <button> falls to the UA's fieldtext: black on a page
+ * that never declared a colour-scheme, near-white on one that did. Neither is
+ * a palette ink, so naming the element is the only way to get it back onto
+ * one.
+ * ------------------------------------------------------------------- */
+:is([data-testid="cell-frame-primary-detail"],
+    [data-testid="cell-frame-secondary"],
+    [data-testid="last-msg-status"],
+    [data-testid="icon-unread-count"],
+    [data-testid="icon-unread-count"] span,
+    [data-testid="icon-mentions"],
+    [data-testid="chat-msg-symbol"],
+    [data-testid="context-btn"]) {
+  color: ${toRgbString(p.secondary)} !important;
+}
+
+/* ---------------------------------------------------------------------
+ * Chat-list footer
+ *
+ * The encryption notice sits below the last row, outside [role="grid"], so
+ * nothing above reaches it: it inherited body ink as though it were body copy,
+ * and the lock glyph - which is fill="currentColor" - came along with it.
+ *
+ * The link is why this pair is written out rather than folded into the rule
+ * above. It is an <a> inside a themed pane, so it resolves through whatever
+ * the host sets for links, and that is the one colour in this subtree we
+ * cannot derive: --teal already maps to the accent, so on a build that routes
+ * links through that token this rule agrees with it, and on a build that does
+ * not, it is the only thing pinning the hue. Naming the element directly is
+ * what makes both land on the same ink.
+ * ------------------------------------------------------------------- */
+[data-testid="chatlist-e2e-message"] {
+  color: ${toRgbString(p.secondary)} !important;
+}
+
+[data-testid="chatlist-e2e-message-link"] {
+  color: ${toRgbString(p.accentInk)} !important;
+}
+
+/* ---------------------------------------------------------------------
+ * Search field
+ *
+ * The one control in the pane that takes typed text, and unthemed it measured
+ * rgb(255,255,255) - the UA's fieldtext, pure white, brighter than any ink in
+ * the palette and unrelated to the scheme. Same cause as the button rules
+ * below: a form control has a colour set on it directly, so no ancestor's
+ * declaration reaches it. Typed text is what you came to read, so it takes
+ * the body ink.
+ *
+ * The placeholder is a separate leak in a separate mechanism, and the worse of
+ * the two. ::placeholder is not inherited at all - it is its own UA declaration
+ * - so naming the input does nothing for it, and it measured rgb(117,117,117):
+ * a fixed mid grey that measures roughly 3.8:1 on the pane it sits on, under the
+ * 4.5:1 floor for text this size, and identical in every scheme because it never
+ * consults one. Supporting ink is the right landing spot: the placeholder is a
+ * prompt, not content, and it is the main thing telling an empty field what it
+ * is for.
+ * ------------------------------------------------------------------- */
+[data-testid="chat-list-search-container"] input {
+  color: ${toRgbString(p.primary)} !important;
+}
+
+[data-testid="chat-list-search-container"] input::placeholder {
+  color: ${toRgbString(p.secondary)} !important;
+}
+
+/* ---------------------------------------------------------------------
+ * Chat-list filter bar
+ *
+ * All, Unread, Favourites, the overflow chevron and the Groups entry inside
+ * it. Five <button>s, and the UA fieldtext got all five: measured pure white,
+ * rgb(255,255,255), along with every label, both counts and the chevron. The
+ * pane header rule above does not reach them and is not meant to - they sit
+ * five and six levels below the pane, not directly under it.
+ *
+ * Two handles rather than one, because the host wraps these inconsistently
+ * and neither attribute covers the whole set. The tablist label reaches all
+ * five; filter-button misses the overflow chevron, which the host parks
+ * outside any filter-button wrapper, and aria-controls misses the Groups
+ * entry in the overflow menu, which has no aria-controls at all. Keeping both
+ * means a rename of either one still leaves the other doing the work, which is
+ * the failure mode that matters here: a handle that quietly stops matching is
+ * invisible until someone reports a white button again.
+ *
+ * The selected tab takes the body ink and the rest take supporting ink, so the
+ * distinction the host draws with colour survives on palette tokens. The
+ * split is read off aria-selected, which is in the markup rather than
+ * guessed; without it the whole bar reads as one undifferentiated strip.
+ * ------------------------------------------------------------------- */
+:is([aria-label="chat-list-filters"] button,
+    [data-testid="filter-button"] button) {
+  color: ${toRgbString(p.secondary)} !important;
+}
+
+:is([aria-label="chat-list-filters"] button,
+    [data-testid="filter-button"] button)[aria-selected="true"] {
+  color: ${toRgbString(p.primary)} !important;
+}
+
+/* ---------------------------------------------------------------------
+ * Pane header buttons
+ *
+ * Locked chats, Archived, and whatever else the host parks in the strip
+ * above the list. Nothing in this sheet names a <button>, so the label took
+ * whatever the host and the UA stylesheet had - measured in a real browser as
+ * rgb(0,0,0), i.e. black ink on a dark panel.
+ *
+ * Scoped to the pane's own direct children rather than written as a bare
+ * "button" type selector because that word is not this subtree's to claim: the composer, the attach
+ * and emoji pickers and the send button are all <button> too, and each of
+ * those already carries ink of its own that a blanket rule would flatten.
+ * The direct-child position is what makes this specific - these are the pane's
+ * own header controls, not buttons that happen to live in the pane.
+ *
+ * The inner <span> is named alongside the button because the label text sits
+ * one level down inside a [role="group"] wrapper and nothing between here and
+ * there sets a colour, and the glyph beside it is fill="currentColor".
+ * ------------------------------------------------------------------- */
+:is(#side, #pane-side) > button,
+:is(#side, #pane-side) > button span {
+  color: ${toRgbString(p.primary)} !important;
 }
 
 ::selection {
@@ -1518,6 +1832,9 @@ module.exports = {
   contrastRatio,
   composite,
   mix,
+  rgbToHsl,
+  hslToRgb,
+  tintSurface,
   isDarkSurface,
   BUBBLE_ALPHA,
   choosePanel,

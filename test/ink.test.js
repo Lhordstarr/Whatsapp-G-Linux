@@ -147,6 +147,11 @@ function floors(p) {
     ['secondary on page', contrastRatio(p.secondary, page), 4.5, [page, panel]],
     ['onBubble on incoming', contrastRatio(p.onBubble, incoming), 7, [incoming, outgoing]],
     ['onBubble on outgoing', contrastRatio(p.onBubble, outgoing), 7, [incoming, outgoing]],
+    // Avatar discs are opaque - a contact initial has no bubble alpha anywhere
+    // in its stack - so the reference is the token, not the painted bubble, and
+    // onAvatar is a separate field precisely because that is a different test.
+    ['onAvatar on incoming disc', contrastRatio(p.onAvatar, p.incoming), 7, [p.incoming, p.outgoing]],
+    ['onAvatar on outgoing disc', contrastRatio(p.onAvatar, p.outgoing), 7, [p.incoming, p.outgoing]],
     ['accent on panel', contrastRatio(p.accentInk, panel), 4.5, [panel, outgoing]],
   ];
 }
