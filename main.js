@@ -678,10 +678,7 @@ function buildPalette(scheme, overrides, followSystem) {
 const OVERLAY_CONTAINERS = [
   '#side',
   '#main',
-<<<<<<< HEAD
   '#main > div',
-=======
->>>>>>> 306054b (refactor: enhance overlay container management and fix status playback issues)
   'header',
   '._akbd',
   '[role="region"]',
