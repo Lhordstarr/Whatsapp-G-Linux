@@ -773,7 +773,7 @@ body {
  * the result is cached until something behind them changes, so the cost is
  * paid on resize / theme change rather than per frame.
  * ------------------------------------------------------------------- */
-#side:not(:has(video)), #main:not(:has(video)), header:not(:has(video)), ._akbd:not(:has(video)), [role="region"]:not(:has(video)) {
+:is(#side, #main, header, ._akbd, [role="region"]):not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: ${filter} !important;
   -webkit-backdrop-filter: ${filter} !important;
@@ -816,8 +816,7 @@ body {
  * the two surfaces the ink was checked against, with the panel's contrast on
  * one side and the page's on the other.
  * ------------------------------------------------------------------- */
-[data-asset-chat-background="true"]:not(:has(video)),
-#main > div:not(:has(footer)):not(:has([contenteditable="true"])):not(:has(video)) {
+:is([data-asset-chat-background="true"], #main > div:not(:has(footer)):not(:has([contenteditable="true"]))):not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
@@ -949,8 +948,7 @@ body {
   backface-visibility: hidden;
 }
 
-footer:not(:has(video)),
-[tabindex="-1"]:has(div[contenteditable="true"]):not(:has(video)) {
+:is(footer, [tabindex="-1"]:has(div[contenteditable="true"])):not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: ${filter} !important;
   -webkit-backdrop-filter: ${filter} !important;

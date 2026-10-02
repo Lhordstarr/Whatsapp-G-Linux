@@ -798,7 +798,8 @@ test('every container the sheet paints or promotes is video-guarded', () => {
       const base = sel
         .replace(/:not\([^)]*\)/g, '')
         .replace(/:has\([^)]*\)/g, '')
-        .replace(/:is\([^)]*\)/g, '')
+        .replace(/:is\(/g, '')
+        .replace(/\)/g, '')
         .trim();
       if (base) targeted.add(base);
     }
