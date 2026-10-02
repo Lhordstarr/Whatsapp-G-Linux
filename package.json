@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/palette.test.js && node test/ink.test.js && node test/inject.test.js && node test/ua.test.js"
+    "test": "node test/palette.test.js && node test/ink.test.js && node test/inject.test.js && node test/ua.test.js",
+    "build:icon": "node scripts/build-icon.js"
   },
   "keywords": [
     "whatsapp",

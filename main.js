@@ -773,7 +773,7 @@ body {
  * the result is cached until something behind them changes, so the cost is
  * paid on resize / theme change rather than per frame.
  * ------------------------------------------------------------------- */
-#side, #main, header, ._akbd, [role="region"] {
+#side:not(:has(video)), #main:not(:has(video)), header:not(:has(video)), ._akbd:not(:has(video)), [role="region"]:not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: ${filter} !important;
   -webkit-backdrop-filter: ${filter} !important;
@@ -816,8 +816,8 @@ body {
  * the two surfaces the ink was checked against, with the panel's contrast on
  * one side and the page's on the other.
  * ------------------------------------------------------------------- */
-[data-asset-chat-background="true"],
-#main > div:not(:has(footer)):not(:has([contenteditable="true"])) {
+[data-asset-chat-background="true"]:not(:has(video)),
+#main > div:not(:has(footer)):not(:has([contenteditable="true"])):not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
@@ -878,24 +878,9 @@ body {
   background-color: transparent !important;
 }
 
-<<<<<<< HEAD
-#side:has(video),
-#main:has(video),
-#main > div:has(video),
-header:has(video),
-._akbd:has(video),
-[role="region"]:has(video),
-footer:has(video),
-[data-asset-chat-background="true"]:has(video),
-.message-list:has(video),
-[data-animated-message-list]:has(video),
-.message-in:has(video),
-.message-out:has(video) {
-=======
-:is(#side, #main, header, ._akbd, [role="region"], footer,
+:is(#side, #main, #main > div, header, ._akbd, [role="region"], footer,
     [data-asset-chat-background="true"], .message-list,
-    [data-animated-message-list], .message-in, .message-out):has(video) {
->>>>>>> 306054b (refactor: enhance overlay container management and fix status playback issues)
+    [data-animated-message-list], .message.message-in, .message.message-out, [tabindex="-1"]):has(video) {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   filter: none !important;
@@ -959,17 +944,13 @@ footer:has(video),
    above; the containment escape hatch is what keeps a video out of a promoted
    node, and having both would be two lists to keep in sync. */
 .message.message-in:not(:has(video)),
-.message-out:not(:has(video)) {
-  transform: translateZ(0);
-  backface-visibility: hidden;
-}-in,
-.message-out {
+.message.message-out:not(:has(video)) {
   transform: translateZ(0);
   backface-visibility: hidden;
 }
 
-footer,
-[tabindex="-1"]:has(div[contenteditable="true"]) {
+footer:not(:has(video)),
+[tabindex="-1"]:has(div[contenteditable="true"]):not(:has(video)) {
   background-color: ${panel} !important;
   backdrop-filter: ${filter} !important;
   -webkit-backdrop-filter: ${filter} !important;
@@ -1422,6 +1403,9 @@ function createWindow() {
     backgroundColor: '#00000000',
     // Required for the wallpaper to show through the blur.
     transparent: true,
+    // NativeImage cannot read SVG, so the window takes the rasterised copy.
+    // assets/icon.svg is the source; see the `build:icon` script.
+    icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="WhatsApp Glass Native">
+  <title>WhatsApp Glass Native</title>
+  <desc>Glass-morphic speech bubble on the app background token, carrying a read-receipt tick in the accent token.</desc>
+
+  <defs>
+    <!-- The blurred pane showing through the backdrop, in the outgoing token. -->
+    <radialGradient id="pane" cx="50%" cy="42%" r="62%">
+      <stop offset="0%" stop-color="#005c4b" stop-opacity="0.42"/>
+      <stop offset="100%" stop-color="#005c4b" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Specular sheen: the glass highlight across the top of the bubble. -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e9edef" stop-opacity="0.20"/>
+      <stop offset="55%" stop-color="#e9edef" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#e9edef" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Clip so the sheen only lands on the bubble, never the backdrop. -->
+    <clipPath id="bubble">
+      <rect x="88" y="132" width="336" height="196" rx="56"/>
+      <path d="M152 328 L116 392 Q182 364 232 328 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- App background token. -->
+  <rect width="512" height="512" rx="114" fill="#0b0e11"/>
+  <rect width="512" height="512" rx="114" fill="url(#pane)"/>
+
+  <!--
+    Bubble + tail as one group at BUBBLE_ALPHA (0.94), matching how the app
+    paints an outgoing bubble. Group opacity rather than per-shape fill-opacity,
+    so the tail's overlap under the body composites once instead of twice.
+  -->
+  <g opacity="0.94">
+    <path d="M152 328 L116 392 Q182 364 232 328 Z" fill="#005c4b"/>
+    <rect x="88" y="132" width="336" height="196" rx="56" fill="#005c4b"/>
+  </g>
+
+  <g clip-path="url(#bubble)">
+    <rect x="88" y="132" width="336" height="120" fill="url(#sheen)"/>
+  </g>
+
+  <!-- Accent token, where the app puts it: the read receipt. Centred in the
+     bubble body - the tail is decoration and must not drag the marks off-axis. -->
+  <g fill="none" stroke="#00a884" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M190 226 L219 255 L263 205"/>
+    <path d="M249 226 L278 255 L322 205"/>
+  </g>
+</svg>
