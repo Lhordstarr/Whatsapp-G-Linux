@@ -1,19 +1,25 @@
 'use strict';
 
 /**
- * Rasterise assets/icon.svg into the PNGs the window and the desktop use.
+ * Resample assets/icon.png into the icon set the desktop uses.
  *
- * assets/icon.svg is the source of truth. Electron's NativeImage cannot read
- * SVG, so the window is handed a PNG and the checked-in rasters have to be
- * regenerated whenever the source changes - otherwise the icon silently drifts
- * away from the palette it is supposed to be drawn from.
+ * assets/icon.png is the source of truth: it is the master the window is handed
+ * and the image everything else is derived from. Electron's NativeImage cannot
+ * read SVG, and it cannot usefully upscale either, so the master is a raster
+ * and the only job here is producing clean smaller copies of it.
  *
- * Renders at 4x and downsamples, because a 16px icon drawn at 16px and one
- * downsampled from 512px are not the same pixels, and the small sizes are the
- * ones that need the extra samples to stay legible.
+ * This used to rasterise assets/icon.svg instead, at 4x and downsampled -
+ * supersampling only makes sense when the source is vector, since a raster has
+ * no detail to resolve at a higher resolution first. With a raster master a
+ * single Lanczos step is both simpler and better: ImageMagick scales the filter
+ * support for the destination, so a 500px master to 16px is area-averaged
+ * rather than point-sampled.
  *
- * Needs librsvg (rsvg-convert) or resvg on PATH. Both are in the Arch, Debian
- * and Fedora base repos; the script picks whichever it finds.
+ * Regenerate whenever the master changes, or the small sizes - which are the
+ * ones that actually need to stay legible - drift away from it. That drift is
+ * silent: nothing fails, the icon just stops matching its own source.
+ *
+ * Needs ImageMagick's `magick` on PATH.
  */
 
 const { execFileSync } = require('child_process');
@@ -21,38 +27,28 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-const SOURCE = path.join(ROOT, 'assets', 'icon.svg');
-const PRIMARY = path.join(ROOT, 'assets', 'icon.png');
+const SOURCE = path.join(ROOT, 'assets', 'icon.png');
 const SET_DIR = path.join(ROOT, 'assets', 'icons');
 
-/** 512 is what BrowserWindow is handed; the rest are for desktop integration. */
 const SIZES = [16, 24, 32, 48, 64, 128, 256];
 
-/** Supersample factor. 4x is the point where the 16px stop stops being mush. */
-const SUPERSAMPLE = 4;
-
-function findRenderer() {
-  const candidates = [
-    ['rsvg-convert', (size, out) => ['-w', size, '-h', size, SOURCE, '-o', out]],
-    ['resvg', (size, out) => ['--width', String(size), SOURCE, out]],
-  ];
-  for (const [bin, argv] of candidates) {
-    try {
-      execFileSync(bin, ['--version'], { stdio: 'ignore' });
-      return { bin, argv };
-    } catch {
-      /* not installed, try the next one */
-    }
+function requireMagick() {
+  try {
+    execFileSync('magick', ['--version'], { stdio: 'ignore' });
+  } catch {
+    console.error('ImageMagick not found. Install one of:');
+    console.error('  Arch:             pacman -S imagemagick');
+    console.error('  Debian/Ubuntu:    apt install imagemagick');
+    console.error('  Fedora:           dnf install ImageMagick');
+    process.exit(1);
   }
-  return null;
 }
 
 /**
- * Check the renderer actually produced a PNG before trusting it.
+ * Check the output actually is the PNG we asked for.
  *
- * Some builds accept SVG features they cannot rasterise and emit a warning
- * plus a blank canvas, which would otherwise land in the repo as a working
- * file full of nothing.
+ * A wrong size or a truncated file would otherwise land in the repo looking
+ * plausible, and the next run would treat it as an unchanged input.
  */
 function assertRendered(file, expectedSize) {
   if (!fs.existsSync(file)) throw new Error(`${path.basename(file)}: not written`);
@@ -69,54 +65,59 @@ function assertRendered(file, expectedSize) {
   }
 }
 
-function render(renderer, size, out) {
-  // The supersampled frame is staged beside its output, not in os.tmpdir():
-  // that is a different filesystem under some setups, and renameSync across
-  // devices fails with EXDEV.
-  const big = `${out}.supersampled.png`;
-  try {
-    execFileSync(renderer.bin, renderer.argv(size * SUPERSAMPLE, big), { stdio: 'ignore' });
-    assertRendered(big, size * SUPERSAMPLE);
-
-    // -strip drops librsvg's tIME chunk and other metadata, so a rebuild of an
-    // unchanged source is byte-identical and `git diff` stays meaningful.
-    execFileSync(
-      'magick',
-      [big, '-filter', 'Lanczos', '-resize', `${size}x${size}!`, '-strip', out],
-      { stdio: 'ignore' }
-    );
-    assertRendered(out, size);
-  } finally {
-    // Never leave the multi-megabyte frame behind, even on failure.
-    if (fs.existsSync(big)) fs.unlinkSync(big);
+/** The master's own dimensions, read from the PNG header rather than trusted. */
+function masterSize() {
+  const header = fs.readFileSync(SOURCE);
+  if (header.length < 24 || header.readUInt32BE(0) !== 0x89504e47) {
+    throw new Error('assets/icon.png is not a PNG');
   }
+  return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
+}
+
+function resize(size, out) {
+  // -strip drops ImageMagick's tIME chunk and other metadata, so a rebuild of
+  // an unchanged master is byte-identical and `git diff` stays meaningful.
+  execFileSync(
+    'magick',
+    [SOURCE, '-filter', 'Lanczos', '-resize', `${size}x${size}!`, '-strip', out],
+    { stdio: 'ignore' }
+  );
+  assertRendered(out, size);
 }
 
 function main() {
   if (!fs.existsSync(SOURCE)) {
-    console.error(`missing source: ${path.relative(ROOT, SOURCE)}`);
+    console.error(`missing master: ${path.relative(ROOT, SOURCE)}`);
     process.exit(1);
   }
-  const renderer = findRenderer();
-  if (!renderer) {
-    console.error('No SVG rasteriser found. Install one of:');
-    console.error('  Arch/Debian/Fedora:  pacman -S librsvg   /   apt install librsvg2-bin   /   dnf install librsvg2-tools');
-    console.error('  or:                  cargo install resvg');
+  requireMagick();
+
+  const master = masterSize();
+  if (master.width !== master.height) {
+    console.error(`assets/icon.png is ${master.width}x${master.height}, expected square`);
+    process.exit(1);
+  }
+  const largest = Math.max(...SIZES);
+  if (largest > master.width) {
+    // Upscaling a raster invents nothing and looks like mush at the sizes that
+    // matter. Worth stopping for rather than quietly emitting soft icons.
+    console.error(
+      `assets/icon.png is ${master.width}px; cannot produce ${largest}px without upscaling`
+    );
     process.exit(1);
   }
 
   fs.mkdirSync(SET_DIR, { recursive: true });
 
   const started = Date.now();
-  render(renderer, 512, PRIMARY);
-  const written = [PRIMARY];
+  const written = [];
   for (const size of SIZES) {
     const out = path.join(SET_DIR, `${size}.png`);
-    render(renderer, size, out);
+    resize(size, out);
     written.push(out);
   }
 
-  console.log(`rasterised with ${renderer.bin} at ${SUPERSAMPLE}x`);
+  console.log(`resampled from assets/icon.png (${master.width}px master)`);
   for (const file of written) {
     console.log(`  ${path.relative(ROOT, file)}  ${(fs.statSync(file).size / 1024).toFixed(1)} KiB`);
   }

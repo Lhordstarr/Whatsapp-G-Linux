@@ -1,7 +1,7 @@
 # WhatsApp Glass Native
 
 <p align="center">
-  <img src="assets/icon.svg" width="96" height="96" alt="WhatsApp Glass Native icon">
+  <img src="assets/icon.png" width="96" height="96" alt="WhatsApp Glass Native icon">
 </p>
 
 An Electron shell around [WhatsApp Web](https://web.whatsapp.com) that themes it from your live
@@ -43,17 +43,19 @@ npm start
 
 ## Icon
 
-`assets/icon.svg` is the source of truth. Electron's `nativeImage` cannot read SVG — a path to the
-vector loads as a 0×0 empty image — so the window is handed `assets/icon.png` and the raster set in
-`assets/icons/`. Regenerate both after editing the source:
+`assets/icon.png` is the source of truth — a 500px master that the window is handed directly. Electron's
+`nativeImage` cannot read SVG (a path to the vector loads as a 0×0 empty image) and cannot usefully
+upscale, so the master is a raster and the rest is derived from it. After replacing the master,
+resample the set in `assets/icons/`:
 
 ```sh
 npm run build:icon
 ```
 
-Needs `rsvg-convert` (librsvg) or `resvg` on `PATH`; the script picks whichever it finds and reports
-a clear error if neither is installed. Each size is rendered at 4× and box-filtered down, because a
-16px icon drawn at 16px and one downsampled from 2048px are not the same pixels.
+Needs ImageMagick's `magick` on `PATH`. Each size is a single Lanczos step: ImageMagick scales the
+filter support for the destination, so 500px → 16px is area-averaged rather than point-sampled. The
+script refuses to upscale — a soft 256px is worse than no 256px — and `-strip`s its output so a
+rebuild of an unchanged master is byte-identical and `git diff` stays meaningful.
 
 ## Tests
 
@@ -62,7 +64,7 @@ npm test
 ```
 
 No test framework — the assertions are plain enough that a dependency would cost more than it
-saves. Four suites, 112 checks:
+saves. Five suites, 116 checks:
 
 | Suite | Covers |
 | --- | --- |
@@ -70,6 +72,7 @@ saves. Four suites, 112 checks:
 | `test/ink.test.js` | The ink search in `buildPalette` — each token must clear its floor on *every* surface it lands on |
 | `test/inject.test.js` | The stylesheet upsert survives being parsed by the page, and the Electron lifecycle wiring fires |
 | `test/ua.test.js` | User-agent, `sec-ch-ua` client hints and `navigator.*` all agree on "Safari" |
+| `test/icon.test.js` | The icon master and set are readable PNGs at their declared sizes, `createWindow` points at the master, and `build:icon` won't quietly overwrite it |
 
 `main.js` calls `app.getPath()` and reads `nativeTheme` at module scope, so it can't be `require`d
 outside a real Electron process. Each suite stubs the `electron` module via `Module._load` before

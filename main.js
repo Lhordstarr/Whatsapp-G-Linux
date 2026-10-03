@@ -1715,8 +1715,9 @@ function createWindow() {
     backgroundColor: '#00000000',
     // Required for the wallpaper to show through the blur.
     transparent: true,
-    // NativeImage cannot read SVG, so the window takes the rasterised copy.
-    // assets/icon.svg is the source; see the `build:icon` script.
+    // NativeImage reads rasters only - a path to a vector loads as a 0x0 empty
+    // image. assets/icon.png is the master and the window takes it directly;
+    // assets/icons/ is resampled from it by the `build:icon` script.
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       nodeIntegration: false,
