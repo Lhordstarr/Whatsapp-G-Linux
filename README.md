@@ -79,7 +79,8 @@ loading it.
 
 ### Palette resolution
 
-In priority order:
+Light and dark mode are resolved in [`APPEARANCE.md`](APPEARANCE.md) — the tokens decide the
+appearance, not the OS, and the background's own luminance has the final say. In priority order:
 
 1. `~/.local/state/caelestia/scheme.json` — the live Material 3 scheme
 2. `./colors.json` — optional hand-tweaks applied on top
@@ -321,6 +322,9 @@ and the only symptom is that the sidebar quietly stops being glass and falls bac
 host paints. Keeping both costs nothing and there is no version check to decide between them.
 
 ## Configuration
+
+For how `followSystem` interacts with a Caelestia scheme that pins its own mode, see
+[`APPEARANCE.md`](APPEARANCE.md) §5.
 
 Create `colors.json` next to `main.js`. Every key is optional and every value is validated —
 unparseable colours fall back to the scheme or the built-in default, and out-of-range numbers clamp.
